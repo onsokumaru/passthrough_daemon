@@ -12,6 +12,7 @@
 
 
 #define SOCKET_PATH "/tmp/my_daemon_socket"
+#define PIDFILE "/var/run/my_daemon.pid"
 #define MAX_CONNECTIONS 5
 
 static volatile int keep_running = 1;
@@ -29,9 +30,14 @@ void handle_signal(int signum) {
     }
 }
 
-void cleanup(int unix_socket, FILE *lockfile) {
+void cleanup(int unix_socket, FILE *pidfile, FILE *lockfile) {
     if (unix_socket >= 0) {
         close(unix_socket);
+    }
+
+    if (pidfile) {
+        fclose(pidfile);
+        unlink(PIDFILE);
     }
 
     if (lockfile) {
@@ -65,21 +71,31 @@ int main() {
     FILE *lockfile = fopen("/var/run/my_daemon.pid", "w");
     if (!lockfile) {
         log_message("Could not create lock file: %s\n", strerror(errno));
-        cleanup(-1, NULL);
+        cleanup(-1, NULL, NULL);
         exit(EXIT_FAILURE);
     }
 
     if (lockf(fileno(lockfile), F_TLOCK, 0) < 0) {
         log_message("Daemon already running\n");
-        cleanup(-1, lockfile);
+        fclose(lockfile);
         exit(EXIT_FAILURE);
     }
+
+    // Create and write PID to pidfile
+    FILE *pidfile = fopen(PIDFILE, "w");
+    if (!pidfile) {
+        log_message("Could not create PID file: %s\n", strerror(errno));
+        cleanup(-1, NULL, lockfile);
+        exit(EXIT_FAILURE);
+    }
+
+    fprintf(pidfile, "%d\n", getpid());
 
     // Create Unix socket
     int unix_socket = socket(AF_UNIX, SOCK_STREAM, 0);
     if (unix_socket < 0) {
         log_message("Error creating Unix socket: %s\n", strerror(errno));
-        cleanup(-1, lockfile);
+        cleanup(unix_socket, pidfile, lockfile);
         exit(EXIT_FAILURE);
     }
 
@@ -90,14 +106,14 @@ int main() {
     // Bind Unix socket
     if (bind(unix_socket, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         log_message("Error binding Unix socket: %s\n", strerror(errno));
-        cleanup(unix_socket, lockfile);
+        cleanup(unix_socket, pidfile, lockfile);
         exit(EXIT_FAILURE);
     }
 
     // Listen for connections
     if (listen(unix_socket, MAX_CONNECTIONS) < 0) {
         log_message("Error listening on Unix socket: %s\n", strerror(errno));
-        cleanup(unix_socket, lockfile);
+        cleanup(unix_socket, pidfile, lockfile);
         exit(EXIT_FAILURE);
     }
 
@@ -121,7 +137,7 @@ int main() {
         struct sockaddr_in ipv4_addr;
         ipv4_addr.sin_family = AF_INET;
         ipv4_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-        ipv4_addr.sin_port = htons(8888);
+        ipv4_addr.sin_port = htons(9999);
 
         if (connect(ipv4_socket, (struct sockaddr*)&ipv4_addr, sizeof(ipv4_addr)) < 0) {
             log_message("Error connecting to IPv4 socket: %s\n", strerror(errno));
@@ -143,7 +159,7 @@ int main() {
     }
 
     // Cleanup
-    cleanup(unix_socket, lockfile);
+    cleanup(unix_socket, pidfile, lockfile);
 
     return EXIT_SUCCESS;
 }
